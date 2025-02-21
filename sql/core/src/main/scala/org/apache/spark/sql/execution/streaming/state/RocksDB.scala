@@ -133,6 +133,7 @@ class RocksDB(
   private val dbLogger = createLogger() // for forwarding RocksDB native logs to log4j
   rocksDbOptions.setStatistics(new Statistics())
   private val nativeStats = rocksDbOptions.statistics()
+  private var providerListener: Option[RocksDBEventListener] = None
 
   private val workingDir = createTempDir("workingDir")
   private val fileManager = new RocksDBFileManager(dfsRootDir, createTempDir("fileManager"),
@@ -196,6 +197,10 @@ class RocksDB(
 
   @GuardedBy("acquireLock")
   private val shouldForceSnapshot: AtomicBoolean = new AtomicBoolean(false)
+
+  def setListener(listener: RocksDBEventListener): Unit = {
+    providerListener = Some(listener)
+  }
 
   private def getColumnFamilyInfo(cfName: String): ColumnFamilyInfo = {
     colFamilyNameToInfoMap.get(cfName)
@@ -1467,6 +1472,7 @@ class RocksDB(
         log"time taken: ${MDC(LogKeys.TIME_UNITS, uploadTime)} ms. " +
         log"Current lineage: ${MDC(LogKeys.LINEAGE, lineageManager)}")
       lastUploadedSnapshotVersion.set(snapshot.version)
+      providerListener.foreach(_.onSnapshotUploaded(snapshot.version))
     } finally {
       snapshot.close()
     }

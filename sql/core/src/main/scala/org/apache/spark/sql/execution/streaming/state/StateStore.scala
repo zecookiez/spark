@@ -1126,6 +1126,10 @@ object StateStore extends Logging {
     }
   }
 
+  def reportSnapshotUploaded(storeId: StateStoreId, snapshotVersion: Long): Unit = {
+    coordinatorRef.foreach(_.snapshotUploaded(storeId, snapshotVersion))
+  }
+
   private def coordinatorRef: Option[StateStoreCoordinatorRef] = loadedProviders.synchronized {
     val env = SparkEnv.get
     if (env != null) {

@@ -38,9 +38,13 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.{NonFateSharingCache, Utils}
 
+trait RocksDBEventListener {
+  def onSnapshotUploaded(version: Long): Unit
+}
+
 private[sql] class RocksDBStateStoreProvider
   extends StateStoreProvider with Logging with Closeable
-  with SupportsFineGrainedReplay {
+  with SupportsFineGrainedReplay with RocksDBEventListener {
   import RocksDBStateStoreProvider._
 
   class RocksDBStateStore(lastVersion: Long) extends StateStore {
@@ -391,6 +395,7 @@ private[sql] class RocksDBStateStoreProvider
     }
 
     rocksDB // lazy initialization
+    rocksDB.setListener(this)
 
     val dataEncoderCacheKey = StateRowEncoderCacheKey(
       queryRunId = getRunId(hadoopConf),
@@ -643,6 +648,10 @@ private[sql] class RocksDBStateStoreProvider
     if (!isInternal && colFamilyName.charAt(0) == '$') {
       throw StateStoreErrors.cannotCreateColumnFamilyWithReservedChars(colFamilyName)
     }
+  }
+
+  def onSnapshotUploaded(version: Long): Unit = {
+    StateStore.reportSnapshotUploaded(stateStoreId, version)
   }
 }
 
