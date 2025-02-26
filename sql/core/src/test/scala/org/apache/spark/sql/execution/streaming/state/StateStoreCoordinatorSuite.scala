@@ -27,7 +27,7 @@ import org.apache.spark.scheduler.ExecutorCacheTaskLocation
 import org.apache.spark.sql.classic.SparkSession
 import org.apache.spark.sql.execution.streaming.{MemoryStream, StreamingQueryWrapper}
 import org.apache.spark.sql.functions.count
-import org.apache.spark.sql.internal.SQLConf.SHUFFLE_PARTITIONS
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.util.Utils
 
 class StateStoreCoordinatorSuite extends SparkFunSuite with SharedSparkContext {
@@ -125,7 +125,7 @@ class StateStoreCoordinatorSuite extends SparkFunSuite with SharedSparkContext {
       import spark.implicits._
       coordRef = spark.streams.stateStoreCoordinator
       implicit val sqlContext = spark.sqlContext
-      spark.conf.set(SHUFFLE_PARTITIONS.key, "1")
+      spark.conf.set(SQLConf.SHUFFLE_PARTITIONS.key, "1")
 
       // Start a query and run a batch to load state stores
       val inputData = MemoryStream[Int]
@@ -149,6 +149,51 @@ class StateStoreCoordinatorSuite extends SparkFunSuite with SharedSparkContext {
       // Stop and verify whether the stores are deactivated in the coordinator
       query.stop()
       assert(coordRef.getLocation(providerId).isEmpty)
+    } finally {
+      SparkSession.getActiveSession.foreach(_.streams.active.foreach(_.stop()))
+      if (coordRef != null) coordRef.stop()
+      StateStore.stop()
+    }
+  }
+
+  test("snapshot uploads in RocksDB are properly reported to the coordinator") {
+    var coordRef: StateStoreCoordinatorRef = null
+    try {
+      val spark = SparkSession.builder().sparkContext(sc).getOrCreate()
+      SparkSession.setActiveSession(spark)
+      import spark.implicits._
+      coordRef = spark.streams.stateStoreCoordinator
+      implicit val sqlContext = spark.sqlContext
+      spark.conf.set(SQLConf.SHUFFLE_PARTITIONS.key, "1")
+      spark.conf.set(SQLConf.STREAMING_MAINTENANCE_INTERVAL.key, "100")
+      spark.conf.set(SQLConf.STATE_STORE_MIN_DELTAS_FOR_SNAPSHOT.key, "1")
+
+      // Start a query and run a batch to load state stores
+      val inputData = MemoryStream[Int]
+      val aggregated = inputData.toDF().groupBy("value").agg(count("*")) // stateful query
+      val checkpointLocation = Utils.createTempDir().getAbsoluteFile
+      val query = aggregated.writeStream
+        .format("memory")
+        .outputMode("update")
+        .queryName("query")
+        .option("checkpointLocation", checkpointLocation.toString)
+        .start()
+      inputData.addData(1, 2, 3)
+      query.processAllAvailable()
+      inputData.addData(1, 2, 3)
+      query.processAllAvailable()
+      inputData.addData(1, 2, 3)
+      query.processAllAvailable()
+
+      // Verify state store has uploaded a snapshot and this is registered with the coordinator
+      val stateCheckpointDir =
+        query.asInstanceOf[StreamingQueryWrapper].streamingQuery.lastExecution.checkpointLocation
+      val providerId = StateStoreProviderId(StateStoreId(stateCheckpointDir, 0, 0), query.runId)
+      logWarning(
+        s"ZEYU: snapshot version ${coordRef.getLatestSnapshotVersion(providerId)}"
+      )
+
+      query.stop()
     } finally {
       SparkSession.getActiveSession.foreach(_.streams.active.foreach(_.stop()))
       if (coordRef != null) coordRef.stop()

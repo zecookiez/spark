@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution.streaming.state
 
 import java.io._
 import java.util
-import java.util.Locale
+import java.util.{Locale, UUID}
 import java.util.concurrent.atomic.LongAdder
 
 import scala.collection.mutable
@@ -36,7 +36,7 @@ import org.apache.spark.internal.{Logging, LogKeys, MDC, MessageWithContext}
 import org.apache.spark.io.CompressionCodec
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.errors.QueryExecutionErrors
-import org.apache.spark.sql.execution.streaming.CheckpointFileManager
+import org.apache.spark.sql.execution.streaming.{CheckpointFileManager, StreamExecution}
 import org.apache.spark.sql.execution.streaming.CheckpointFileManager.CancellableFSDataOutputStream
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.util.{SizeEstimator, Utils}
@@ -699,6 +699,11 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
       log"${MDC(LogKeys.STATE_STORE_PROVIDER, this)} at ${MDC(LogKeys.FILE_NAME, targetFile)} " +
       log"for ${MDC(LogKeys.OP_TYPE, opType)}")
     lastSnapshotUploadedVersion = version
+    // Report snapshot upload event back to the coordinator
+    StateStore.reportSnapshotUploaded(
+      StateStoreProviderId(stateStoreId, UUID.fromString(getRunId(hadoopConf))),
+      version
+    )
   }
 
   /**
@@ -1042,6 +1047,16 @@ private[sql] class HDFSBackedStateStoreProvider extends StateStoreProvider with 
     new HDFSBackedStateStoreChangeDataReader(fm, baseDir, startVersion, endVersion,
       CompressionCodec.createCodec(sparkConf, storeConf.compressionCodec),
       keySchema, valueSchema)
+  }
+
+  private def getRunId(hadoopConf: Configuration): String = {
+    val runId = hadoopConf.get(StreamExecution.RUN_ID_KEY)
+    if (runId != null) {
+      runId
+    } else {
+      assert(Utils.isTesting, "Failed to find query id/batch Id in task context")
+      UUID.randomUUID().toString
+    }
   }
 }
 

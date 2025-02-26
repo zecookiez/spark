@@ -1126,8 +1126,8 @@ object StateStore extends Logging {
     }
   }
 
-  def reportSnapshotUploaded(storeId: StateStoreId, snapshotVersion: Long): Unit = {
-    coordinatorRef.foreach(_.snapshotUploaded(storeId, snapshotVersion))
+  def reportSnapshotUploaded(storeProviderId: StateStoreProviderId, snapshotVersion: Long): Unit = {
+    coordinatorRef.foreach(_.snapshotUploaded(storeProviderId, snapshotVersion))
   }
 
   private def coordinatorRef: Option[StateStoreCoordinatorRef] = loadedProviders.synchronized {

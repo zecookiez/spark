@@ -1472,7 +1472,7 @@ class RocksDB(
         log"time taken: ${MDC(LogKeys.TIME_UNITS, uploadTime)} ms. " +
         log"Current lineage: ${MDC(LogKeys.LINEAGE, lineageManager)}")
       lastUploadedSnapshotVersion.set(snapshot.version)
-      providerListener.foreach(_.onSnapshotUploaded(snapshot.version))
+      providerListener.foreach(_.reportSnapshotUploaded(snapshot.version))
     } finally {
       snapshot.close()
     }

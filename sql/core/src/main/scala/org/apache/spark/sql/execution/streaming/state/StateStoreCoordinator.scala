@@ -55,7 +55,10 @@ private case class GetLocation(storeId: StateStoreProviderId)
 private case class DeactivateInstances(runId: UUID)
   extends StateStoreCoordinatorMessage
 
-private case class SnapshotUploaded(storeId: StateStoreId, version: Long)
+private case class SnapshotUploaded(storeId: StateStoreProviderId, version: Long)
+  extends StateStoreCoordinatorMessage
+
+private case class GetLatestSnapshotVersion(storeId: StateStoreProviderId)
   extends StateStoreCoordinatorMessage
 
 private object StopCoordinator
@@ -123,8 +126,14 @@ class StateStoreCoordinatorRef private(rpcEndpointRef: RpcEndpointRef) {
   }
 
   /** Inform that an executor has uploaded a snapshot */
-  private[sql] def snapshotUploaded(storeId: StateStoreId, version: Long): Unit = {
-    rpcEndpointRef.askSync[Boolean](SnapshotUploaded(storeId, version))
+  private[sql] def snapshotUploaded(storeProviderId: StateStoreProviderId, version: Long): Unit = {
+    rpcEndpointRef.askSync[Boolean](SnapshotUploaded(storeProviderId, version))
+  }
+
+  /** Get the latest snapshot version uploaded for a state store */
+  private[sql] def getLatestSnapshotVersion(
+      stateStoreProviderId: StateStoreProviderId): Option[Long] = {
+    rpcEndpointRef.askSync[Option[Long]](GetLatestSnapshotVersion(stateStoreProviderId))
   }
 
   private[state] def stop(): Unit = {
@@ -141,7 +150,7 @@ private class StateStoreCoordinator(override val rpcEnv: RpcEnv)
     extends ThreadSafeRpcEndpoint with Logging {
   private val instances = new mutable.HashMap[StateStoreProviderId, ExecutorCacheTaskLocation]
 
-  private val stateStoreSnapshotVersions = new mutable.HashMap[StateStoreId, Long]
+  private val stateStoreSnapshotVersions = new mutable.HashMap[StateStoreProviderId, Long]
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
     case ReportActiveInstance(id, host, executorId, providerIdsToCheck) =>
@@ -178,30 +187,36 @@ private class StateStoreCoordinator(override val rpcEnv: RpcEnv)
         storeIdsToRemove.mkString(", "))
       context.reply(true)
 
-    case SnapshotUploaded(storeId, version) =>
-      logWarning(s"ZEYU: ! msg of uploaded Snapshot ${storeId} ${version}")
-      stateStoreSnapshotVersions.put(storeId, version)
+    case SnapshotUploaded(providerId, version) =>
+      stateStoreSnapshotVersions.put(providerId, version)
+      logWarning(s"ZEYU: Snapshot uploaded at ${providerId} with version ${version}")
       // Check for state stores falling behind
       val latestPartitionVersion = instances.map(
-        instance => stateStoreSnapshotVersions.getOrElse(instance._1.storeId, -1L)
+        instance => stateStoreSnapshotVersions.getOrElse(instance._1, -1L)
       ).max
-      val storesAtRisk = instances
+      val storesBehind = instances
         .filter {
           case (storeProviderId, _) =>
-            latestPartitionVersion - stateStoreSnapshotVersions.getOrElse(
-              storeProviderId.storeId,
-              -1L
-            ) > 5L
+            val versionDelta =
+              latestPartitionVersion - stateStoreSnapshotVersions.getOrElse(storeProviderId, -1L)
+            versionDelta > 5L
         }
         .keys
         .toSeq
-      if (storesAtRisk.nonEmpty) {
-        logWarning(s"ZEYU: number of partitions at risk: ${storesAtRisk.size}")
-        storesAtRisk.foreach(storeProviderId => {
-          logWarning(s"ZEYU: partition at risk: ${storeProviderId.storeId}")
+      // Report all stores that are behind in snapshot uploads
+      if (storesBehind.nonEmpty) {
+        logWarning(s"ZEYU: Number of state stores falling behind: ${storesBehind.size}")
+        storesBehind.foreach(storeProviderId => {
+          val version = stateStoreSnapshotVersions.getOrElse(storeProviderId, -1L)
+          logWarning(s"ZEYU: State store falling behind ${storeProviderId} with version $version")
         })
       }
       context.reply(true)
+
+    case GetLatestSnapshotVersion(providerId) =>
+      val version = stateStoreSnapshotVersions.get(providerId)
+      logWarning(s"ZEYU: Got latest snapshot version of the state store $providerId: $version")
+      context.reply(version)
 
     case StopCoordinator =>
       stop() // Stop before replying to ensure that endpoint name has been deregistered

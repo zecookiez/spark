@@ -38,8 +38,9 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.util.{NonFateSharingCache, Utils}
 
+/** Trait representing the different events reported from RocksDB instance */
 trait RocksDBEventListener {
-  def onSnapshotUploaded(version: Long): Unit
+  def reportSnapshotUploaded(version: Long): Unit
 }
 
 private[sql] class RocksDBStateStoreProvider
@@ -395,6 +396,9 @@ private[sql] class RocksDBStateStoreProvider
     }
 
     rocksDB // lazy initialization
+
+    // Give the RocksDB instance a reference to this provider so it can call back to report
+    // specific events like snapshot uploads
     rocksDB.setListener(this)
 
     val dataEncoderCacheKey = StateRowEncoderCacheKey(
@@ -650,8 +654,21 @@ private[sql] class RocksDBStateStoreProvider
     }
   }
 
-  def onSnapshotUploaded(version: Long): Unit = {
-    StateStore.reportSnapshotUploaded(stateStoreId, version)
+  /** Callback function from RocksDB to report events to the coordinator.
+   *  Additional information such as state store ID and query run ID are populated here
+   *  to report back to the coordinator.
+   *
+   * @param version The snapshot version that was just uploaded from RocksDB
+   */
+  def reportSnapshotUploaded(version: Long): Unit = {
+    // Collect the state store ID and query run ID to report back to the coordinator
+    StateStore.reportSnapshotUploaded(
+      StateStoreProviderId(
+        stateStoreId,
+        UUID.fromString(getRunId(hadoopConf))
+      ),
+      version
+    )
   }
 }
 
