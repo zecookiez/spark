@@ -55,6 +55,9 @@ private case class GetLocation(storeId: StateStoreProviderId)
 private case class DeactivateInstances(runId: UUID)
   extends StateStoreCoordinatorMessage
 
+private case class SnapshotUploaded(storeId: StateStoreId, version: Long)
+  extends StateStoreCoordinatorMessage
+
 private object StopCoordinator
   extends StateStoreCoordinatorMessage
 
@@ -119,6 +122,11 @@ class StateStoreCoordinatorRef private(rpcEndpointRef: RpcEndpointRef) {
     rpcEndpointRef.askSync[Boolean](DeactivateInstances(runId))
   }
 
+  /** Inform that an executor has uploaded a snapshot */
+  private[sql] def snapshotUploaded(storeId: StateStoreId, version: Long): Unit = {
+    rpcEndpointRef.askSync[Boolean](SnapshotUploaded(storeId, version))
+  }
+
   private[state] def stop(): Unit = {
     rpcEndpointRef.askSync[Boolean](StopCoordinator)
   }
@@ -132,6 +140,8 @@ class StateStoreCoordinatorRef private(rpcEndpointRef: RpcEndpointRef) {
 private class StateStoreCoordinator(override val rpcEnv: RpcEnv)
     extends ThreadSafeRpcEndpoint with Logging {
   private val instances = new mutable.HashMap[StateStoreProviderId, ExecutorCacheTaskLocation]
+
+  private val stateStoreSnapshotVersions = new mutable.HashMap[StateStoreId, Long]
 
   override def receiveAndReply(context: RpcCallContext): PartialFunction[Any, Unit] = {
     case ReportActiveInstance(id, host, executorId, providerIdsToCheck) =>
@@ -166,6 +176,31 @@ private class StateStoreCoordinator(override val rpcEnv: RpcEnv)
       instances --= storeIdsToRemove
       logDebug(s"Deactivating instances related to checkpoint location $runId: " +
         storeIdsToRemove.mkString(", "))
+      context.reply(true)
+
+    case SnapshotUploaded(storeId, version) =>
+      logWarning(s"ZEYU: ! msg of uploaded Snapshot ${storeId} ${version}")
+      stateStoreSnapshotVersions.put(storeId, version)
+      // Check for state stores falling behind
+      val latestPartitionVersion = instances.map(
+        instance => stateStoreSnapshotVersions.getOrElse(instance._1.storeId, -1L)
+      ).max
+      val storesAtRisk = instances
+        .filter {
+          case (storeProviderId, _) =>
+            latestPartitionVersion - stateStoreSnapshotVersions.getOrElse(
+              storeProviderId.storeId,
+              -1L
+            ) > 5L
+        }
+        .keys
+        .toSeq
+      if (storesAtRisk.nonEmpty) {
+        logWarning(s"ZEYU: number of partitions at risk: ${storesAtRisk.size}")
+        storesAtRisk.foreach(storeProviderId => {
+          logWarning(s"ZEYU: partition at risk: ${storeProviderId.storeId}")
+        })
+      }
       context.reply(true)
 
     case StopCoordinator =>
